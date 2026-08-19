@@ -15,8 +15,8 @@
   --body: 'Quicksand', system-ui, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, monospace;
 
-  --r: 14px;
-  --r-sm: 10px;
+  --r: 6px;
+  --r-sm: 5px;
   --shadow: 0 1px 0 var(--line), 0 6px 18px rgba(18, 35, 29, 0.08);
 }
 
@@ -396,7 +396,7 @@ button.sm { padding: 8px 13px; font-size: 12px; }
 .msg .bubble {
   background: #fff;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: var(--r-sm);
   padding: 9px 13px;
   font-size: 14px;
   white-space: pre-wrap;
@@ -404,9 +404,8 @@ button.sm { padding: 8px 13px; font-size: 12px; }
 }
 .msg.mine { align-self: flex-end; }
 .msg.mine .meta { text-align: right; }
-.msg.mine .bubble { background: var(--ink); border-color: var(--ink); color: var(--card); border-bottom-right-radius: 4px; }
+.msg.mine .bubble { background: var(--ink); border-color: var(--ink); color: var(--card); }
 .msg.admin .bubble { background: var(--signal); border-color: #c96a05; color: #fff; }
-.msg:not(.mine) .bubble { border-bottom-left-radius: 4px; }
 
 .chat-form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); background: #fff; }
 .chat-form input { flex: 1; }
