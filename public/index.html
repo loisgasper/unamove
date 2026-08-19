@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Unamove — pabili and padala, tracked live</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#12231d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Unamove" />
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .landing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 440px); gap: 48px; align-items: start; padding-top: 46px; }
+  @media (max-width: 940px) { .landing { grid-template-columns: 1fr; gap: 28px; padding-top: 26px; } }
+  .hero-board { font-size: clamp(18px, 3.2vw, 30px); padding: 20px 18px; }
+  .hero-board .from, .hero-board .to { transition: opacity 0.35s ease; }
+  .hero-copy { font-size: 17px; color: var(--ink-2); max-width: 46ch; margin: 22px 0 0; }
+  .how { display: grid; gap: 14px; margin-top: 34px; max-width: 46ch; }
+  .how div { display: grid; grid-template-columns: 26px 1fr; gap: 12px; font-size: 14px; }
+  .how b { font-family: var(--display); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); padding-top: 2px; }
+  .results { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+  .results li button { width: 100%; text-align: left; font-family: var(--body); font-size: 13px; letter-spacing: 0; text-transform: none; background: #fff; color: var(--ink); border-color: var(--line); padding: 7px 10px; }
+  .map.sm { height: 220px; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="/">Unamove</a>
+  <span class="spacer"></span>
+  <span class="eyebrow" style="color:#a9bcb2">Cebu</span>
+</header>
+
+<main class="wrap landing">
+  <section>
+    <p class="eyebrow">Pabili and padala booking</p>
+    <div class="routeboard hero-board" id="heroBoard" aria-live="off">
+      <span class="from">Sari-sari store</span>
+      <span class="arrow" aria-hidden="true">&rarr;</span>
+      <span class="to">Your gate</span>
+    </div>
+    <p class="hero-copy">
+      Book a rider to buy something and bring it to you. Tell them what you need in the chat,
+      then watch them move on the map until they knock.
+    </p>
+
+    <div class="how">
+      <div><b>01</b><span>Create an account and wait for the store to verify your ID by hand.</span></div>
+      <div><b>02</b><span>Book: name the store, name the drop-off, write what to buy.</span></div>
+      <div><b>03</b><span>Admin puts a rider on it. You see who they are and where they are.</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="tabs" role="tablist">
+      <button class="tab" id="tabIn" role="tab" aria-selected="true" aria-controls="panelIn">Sign in</button>
+      <button class="tab" id="tabUp" role="tab" aria-selected="false" aria-controls="panelUp">Create account</button>
+    </div>
+
+    <!-- Sign in -->
+    <form id="panelIn" role="tabpanel">
+      <label>
+        <span class="lbl">Username</span>
+        <input name="username" autocomplete="username" required />
+      </label>
+      <label>
+        <span class="lbl">Password</span>
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button class="primary" type="submit" style="width:100%">Sign in</button>
+      <p class="hint" style="margin-top:12px;color:var(--muted);font-size:13px">
+        Riders do not sign up here. Go to the store and admin will register you.
+      </p>
+    </form>
+
+    <!-- Register -->
+    <form id="panelUp" role="tabpanel" class="hide" enctype="multipart/form-data">
+      <div class="row">
+        <label><span class="lbl">Username</span><input name="username" autocomplete="username" required /></label>
+        <label><span class="lbl">Password</span><input name="password" type="password" minlength="8" autocomplete="new-password" required /></label>
+      </div>
+      <label><span class="lbl">Full name</span><input name="fullName" required /></label>
+      <div class="row">
+        <label><span class="lbl">Age</span><input name="age" type="number" min="15" max="120" required /></label>
+        <label><span class="lbl">Mobile number</span><input name="phone" inputmode="tel" required /></label>
+      </div>
+      <label>
+        <span class="lbl">Exact address</span>
+        <textarea name="address" required placeholder="House or unit no., street, barangay, city — the rider uses this to find you"></textarea>
+        <span class="hint" id="addrHint">Keep typing — the map below follows along. Tap it to fine-tune the pin.</span>
+      </label>
+      <ul class="results" id="addrResults"></ul>
+      <div id="addrMap" class="map sm"></div>
+      <input type="hidden" name="addressLat" id="addressLat" />
+      <input type="hidden" name="addressLng" id="addressLng" />
+      <label>
+        <span class="lbl">Photo of your ID</span>
+        <input name="idPhoto" type="file" accept="image/*" required />
+        <span class="hint">Any government or school ID. Only the admin sees this.</span>
+      </label>
+      <label>
+        <span class="lbl">Facebook profile link</span>
+        <input name="facebookLink" type="url" placeholder="https://facebook.com/..." />
+        <span class="hint">Used only by the admin to confirm you are a real person. Riders never see it.</span>
+      </label>
+      <button class="primary" type="submit" style="width:100%">Create account</button>
+      <p class="hint" style="margin-top:12px;color:var(--muted);font-size:13px">
+        A person at the store checks every account. You can sign in right away, but you can only
+        book once they mark you verified.
+      </p>
+    </form>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/js/common.js"></script>
+<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
+<script>
+  // Destination board cycles through real errands, the way a route sign flips.
+  const ROUTES = [
+    ['Sari-sari store', 'Your gate'],
+    ['Aling Nena bakery', 'Purok 3, Talamban'],
+    ['Botika sa kanto', 'Lola Ising, Mabolo'],
+    ['Palengke, Carbon', 'Apartment 2B, Lahug'],
+  ];
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const board = document.getElementById('heroBoard');
+    const from = board.querySelector('.from');
+    const to = board.querySelector('.to');
+    let i = 0;
+    setInterval(() => {
+      i = (i + 1) % ROUTES.length;
+      from.style.opacity = to.style.opacity = '0';
+      setTimeout(() => {
+        from.textContent = ROUTES[i][0];
+        to.textContent = ROUTES[i][1];
+        from.style.opacity = to.style.opacity = '1';
+      }, 350);
+    }, 3800);
+  }
+
+  const tabIn = $('#tabIn'), tabUp = $('#tabUp');
+  const panelIn = $('#panelIn'), panelUp = $('#panelUp');
+
+  function show(which) {
+    const signIn = which === 'in';
+    tabIn.setAttribute('aria-selected', signIn);
+    tabUp.setAttribute('aria-selected', !signIn);
+    panelIn.classList.toggle('hide', !signIn);
+    panelUp.classList.toggle('hide', signIn);
+    if (!signIn) setupAddrMap();
+  }
+  tabIn.onclick = () => show('in');
+  tabUp.onclick = () => show('up');
+
+  /* ---------- address map ---------- */
+  let addrMap, addrMarker, addrMapReady = false, addrSearchTimer = null, lastAddrQuery = '';
+
+  function setupAddrMap() {
+    if (addrMapReady) return;
+    addrMapReady = true;
+    addrMap = makeMap('addrMap');
+    setTimeout(() => addrMap.invalidateSize(), 150);
+    addrMap.on('click', (e) => setAddrPin(e.latlng.lat, e.latlng.lng));
+
+    const addressField = panelUp.querySelector('[name="address"]');
+    addressField.addEventListener('input', () => {
+      clearTimeout(addrSearchTimer);
+      addrSearchTimer = setTimeout(() => runAddrSearch(addressField.value.trim()), 550);
+    });
+  }
+
+  function setAddrPin(lat, lng, pan) {
+    $('#addressLat').value = lat;
+    $('#addressLng').value = lng;
+    if (addrMarker) addrMap.removeLayer(addrMarker);
+    addrMarker = L.marker([lat, lng], { icon: pinIcon('A', '#f5850c') }).addTo(addrMap).bindTooltip('Your address');
+    if (pan) addrMap.setView([lat, lng], 17);
+  }
+
+  async function runAddrSearch(q) {
+    const list = $('#addrResults');
+    if (q.length < 3 || q === lastAddrQuery) { if (q.length < 3) list.innerHTML = ''; return; }
+    lastAddrQuery = q;
+    try {
+      const { results } = await fetch(`/api/geocode/public?q=${encodeURIComponent(q)}`).then((r) => r.json());
+      if (!results || !results.length) { list.innerHTML = ''; return; }
+      list.innerHTML = results.map((r, i) => `<li><button type="button" data-i="${i}">${esc(r.label)}</button></li>`).join('');
+      $$('#addrResults button').forEach((b) => {
+        b.onclick = () => {
+          const r = results[Number(b.dataset.i)];
+          setAddrPin(r.lat, r.lng, true);
+          list.innerHTML = '';
+        };
+      });
+    } catch (_) {
+      /* address search is best-effort; typed address still works without it */
+    }
+  }
+
+  panelIn.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = panelIn.querySelector('button');
+    btn.disabled = true;
+    try {
+      const form = new FormData(panelIn);
+      const { account } = await api('/api/login', {
+        body: { username: form.get('username'), password: form.get('password') },
+      });
+      location.href = `/${account.role}`;
+    } catch (err) {
+      toast(err.message, true);
+      btn.disabled = false;
+    }
+  });
+
+  panelUp.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = panelUp.querySelector('button');
+    btn.disabled = true;
+    try {
+      await api('/api/register', { method: 'POST', body: new FormData(panelUp) });
+      location.href = '/customer';
+    } catch (err) {
+      toast(err.message, true);
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

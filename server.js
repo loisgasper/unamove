@@ -115,6 +115,7 @@ function selfView(a) {
     fullName: a.fullName,
     phone: a.phone,
     address: a.address || '',
+    addressPoint: a.addressPoint || null,
     age: a.age || null,
     status: a.status,
     vehicle: a.vehicle || '',
@@ -132,13 +133,20 @@ function counterpartView(a, viewerRole) {
     card.plateNumber = a.plateNumber || '';
   }
   // A rider needs the delivery address to actually get there.
-  if (a.role === 'customer' && viewerRole === 'rider') card.address = a.address || '';
+  if (a.role === 'customer' && viewerRole === 'rider') {
+    card.address = a.address || '';
+    card.addressPoint = a.addressPoint || null;
+  }
   return card;
 }
 
 // ==========================================================================
 // Orders
 // ==========================================================================
+
+// Starting reference only — the real total (items + delivery) is agreed
+// between customer and rider in the order chat.
+const STANDARD_DELIVERY_FEE = 40;
 
 const STATUS_LABELS = {
   pending: 'Waiting for a rider',
@@ -159,6 +167,14 @@ const RIDER_MOVES = {
 };
 
 const OPEN_STATUSES = ['pending', 'assigned', 'accepted', 'picked_up', 'in_transit'];
+// Statuses that count as a rider actively carrying a job (excludes "pending",
+// which has no rider yet).
+const RIDER_OPEN_STATUSES = ['assigned', 'accepted', 'picked_up', 'in_transit'];
+const MAX_CONCURRENT_JOBS = 3;
+
+function riderOpenJobs(riderId) {
+  return db.orders().filter((o) => o.riderId === riderId && RIDER_OPEN_STATUSES.includes(o.status));
+}
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}${crypto.randomBytes(4).toString('hex')}`;
@@ -175,14 +191,25 @@ function point(raw) {
 }
 
 function orderView(order, viewer) {
+  const { offeredTo, ...rest } = order;
   const customer = db.findAccount(order.customerId);
   const rider = order.riderId ? db.findAccount(order.riderId) : null;
   const base = {
-    ...order,
+    ...rest,
     statusLabel: STATUS_LABELS[order.status] || order.status,
     customer: null,
     rider: null,
   };
+  if (order.status === 'pending') {
+    base.offerCount = (offeredTo || []).length;
+  }
+  if (rider && RIDER_OPEN_STATUSES.includes(order.status)) {
+    // Other jobs this rider is juggling right now, oldest first — this order's
+    // spot in that queue is how many of those were assigned before it.
+    const riderJobs = riderOpenJobs(rider.id).sort((a, b) => a.assignedAt.localeCompare(b.assignedAt));
+    base.riderOtherJobs = riderJobs.length - 1;
+    base.riderQueuePosition = riderJobs.findIndex((o) => o.id === order.id) + 1;
+  }
   if (viewer.role === 'admin') {
     base.customer = customer ? { id: customer.id, fullName: customer.fullName, phone: customer.phone, address: customer.address } : null;
     base.rider = rider ? { id: rider.id, fullName: rider.fullName, phone: rider.phone, plateNumber: rider.plateNumber } : null;
@@ -234,6 +261,33 @@ function broadcastOrder(order) {
   }
 }
 
+/**
+ * Offer a fresh booking to every online, non-suspended, not-already-full
+ * rider. Anyone can accept; the first to hit /accept wins and everyone else's
+ * popup closes. No admin step in between — this is the whole assignment path.
+ */
+function offerToRiders(order) {
+  const eligible = db
+    .accounts()
+    .filter((a) => a.role === 'rider' && a.status === 'active' && a.isOnline && riderOpenJobs(a.id).length < MAX_CONCURRENT_JOBS);
+  order.offeredTo = eligible.map((r) => r.id);
+  db.save('orders');
+
+  for (const rider of eligible) {
+    io.to(`user:${rider.id}`).emit('rider:offer', orderView(order, rider));
+    push.sendTo(rider.id, {
+      title: 'New booking nearby',
+      body: routeLine(order),
+      url: '/rider',
+      tag: `offer-${order.id}`,
+      renotify: true,
+      requireInteraction: true,
+      urgency: 'high',
+    });
+  }
+  broadcastOrder(order); // lets the customer's "looking for a rider" count update
+}
+
 // ==========================================================================
 // Auth routes
 // ==========================================================================
@@ -260,6 +314,10 @@ app.post('/api/register', upload.single('idPhoto'), (req, res) => {
     return res.status(400).json({ error: 'Attach a photo of your ID. Admin checks this by hand.' });
   }
 
+  const lat = Number(b.addressLat);
+  const lng = Number(b.addressLng);
+  const hasPin = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+
   const { salt, hash } = hashPassword(b.password);
   const account = {
     id: newId('acc'),
@@ -270,6 +328,7 @@ app.post('/api/register', upload.single('idPhoto'), (req, res) => {
     fullName: String(b.fullName).trim(),
     age,
     address: String(b.address).trim(),
+    addressPoint: hasPin ? { lat, lng } : null,
     phone: String(b.phone).trim(),
     idPhoto: req.file.filename,
     facebookLink: String(b.facebookLink || '').trim(), // admin verification only
@@ -320,6 +379,36 @@ app.get('/api/me', (req, res) => {
   res.json({ account: selfView(account) });
 });
 
+app.post('/api/account/reupload', requireAuth('customer'), upload.single('idPhoto'), (req, res) => {
+  const account = req.account;
+  if (account.status !== 'rejected') {
+    return res.status(400).json({ error: 'Re-upload is only needed when your account needs more details.' });
+  }
+  if (!req.file) {
+    return res.status(400).json({ error: 'Attach a photo of your ID.' });
+  }
+  const oldPhoto = account.idPhoto;
+  account.idPhoto = req.file.filename;
+  account.status = 'pending';
+  account.reviewNote = '';
+  account.reviewedBy = null;
+  account.reviewedAt = null;
+  db.save('accounts');
+  if (oldPhoto) {
+    fs.unlink(path.join(UPLOAD_DIR, path.basename(oldPhoto)), () => {});
+  }
+
+  io.to('admins').emit('admin:reupload', adminView(account));
+  push.sendToAdmins({
+    title: 'Re-submitted ID to verify',
+    body: `${account.fullName} uploaded a new ID and is waiting for verification.`,
+    url: '/admin',
+    tag: 'signups',
+    renotify: true,
+  });
+  res.json({ account: selfView(account) });
+});
+
 // ==========================================================================
 // Customer routes
 // ==========================================================================
@@ -335,6 +424,10 @@ app.post('/api/orders', requireAuth('customer'), (req, res) => {
   if (!dropoff) return res.status(400).json({ error: 'Name the drop-off point.' });
   const instructions = String(b.instructions || '').trim();
   if (!instructions) return res.status(400).json({ error: 'Write what the rider should buy or bring.' });
+  const paymentMethod = String(b.paymentMethod || '').trim();
+  if (!['cash', 'gcash'].includes(paymentMethod)) {
+    return res.status(400).json({ error: 'Choose how you will pay: cash or GCash.' });
+  }
 
   const order = {
     id: newId('ord'),
@@ -345,11 +438,13 @@ app.post('/api/orders', requireAuth('customer'), (req, res) => {
     dropoff,
     instructions: instructions.slice(0, 2000),
     budget: Number(b.budget) || 0,
-    deliveryFee: 0,
+    paymentMethod,
+    deliveryFee: STANDARD_DELIVERY_FEE,
     createdAt: new Date().toISOString(),
     assignedAt: null,
     completedAt: null,
     cancelReason: '',
+    offeredTo: [],
     timeline: [{ status: 'pending', at: new Date().toISOString(), by: req.account.id }],
   };
   db.orders().push(order);
@@ -364,6 +459,7 @@ app.post('/api/orders', requireAuth('customer'), (req, res) => {
     renotify: true,
     urgency: 'high',
   });
+  offerToRiders(order);
   res.json({ order: orderView(order, req.account) });
 });
 
@@ -397,12 +493,17 @@ app.post('/api/orders/:id/cancel', requireAuth('customer', 'admin'), (req, res) 
   if (req.account.role === 'customer' && !['pending', 'assigned'].includes(order.status)) {
     return res.status(400).json({ error: 'The rider already started. Message them or ask admin to cancel.' });
   }
+  const openOffers = order.offeredTo || [];
   order.status = 'cancelled';
   order.cancelReason = String((req.body && req.body.reason) || '').slice(0, 300);
   order.completedAt = new Date().toISOString();
+  order.offeredTo = [];
   pushTimeline(order, 'cancelled', req.account.id);
   db.save('orders');
   broadcastOrder(order);
+  for (const riderId of openOffers) {
+    io.to(`user:${riderId}`).emit('rider:offerClosed', { orderId: order.id });
+  }
   const tellThese = req.account.role === 'admin'
     ? [order.customerId, order.riderId]
     : [order.riderId];
@@ -467,6 +568,54 @@ app.post('/api/orders/:id/decline', requireAuth('rider'), (req, res) => {
   db.save('orders');
   broadcastOrder(order);
   io.to('admins').emit('admin:newOrder', order);
+  offerToRiders(order);
+  res.json({ ok: true });
+});
+
+// A rider tapping Accept on a broadcast offer. First one in wins; everyone
+// else who was offered the same booking gets told it is taken.
+app.post('/api/orders/:id/accept-offer', requireAuth('rider'), (req, res) => {
+  const order = db.findOrder(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Booking not found.' });
+  if (order.status !== 'pending') {
+    return res.status(409).json({ error: 'Someone already took this one.' });
+  }
+  if (req.account.status !== 'active') {
+    return res.status(403).json({ error: 'Your account is not active.' });
+  }
+  if (riderOpenJobs(req.account.id).length >= MAX_CONCURRENT_JOBS) {
+    return res.status(400).json({ error: `You already have ${MAX_CONCURRENT_JOBS} bookings on the go.` });
+  }
+  const otherCandidates = (order.offeredTo || []).filter((id) => id !== req.account.id);
+  order.riderId = req.account.id;
+  order.assignedAt = new Date().toISOString();
+  order.status = 'assigned';
+  order.offeredTo = [];
+  pushTimeline(order, 'assigned', req.account.id);
+  db.save('orders');
+  broadcastOrder(order);
+
+  for (const riderId of otherCandidates) {
+    io.to(`user:${riderId}`).emit('rider:offerClosed', { orderId: order.id });
+  }
+  io.to('admins').emit('admin:newOrder', order);
+  push.sendTo(order.customerId, {
+    title: 'You have a rider',
+    body: `${req.account.fullName} · ${req.account.plateNumber} is taking your booking.`,
+    url: '/customer',
+    tag: `order-${order.id}`,
+    renotify: true,
+  });
+  res.json({ order: orderView(order, req.account) });
+});
+
+// Dismissing an offer before accepting it. Purely local to that rider — the
+// booking stays open for everyone else it was offered to.
+app.post('/api/orders/:id/decline-offer', requireAuth('rider'), (req, res) => {
+  const order = db.findOrder(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Booking not found.' });
+  order.offeredTo = (order.offeredTo || []).filter((id) => id !== req.account.id);
+  db.save('orders');
   res.json({ ok: true });
 });
 
@@ -511,7 +660,7 @@ app.post('/api/admin/accounts/:id/review', requireAuth('admin'), (req, res) => {
   if (!account || account.role !== 'customer') return res.status(404).json({ error: 'Customer not found.' });
   const status = String((req.body && req.body.status) || '');
   if (!['verified', 'rejected', 'pending'].includes(status)) {
-    return res.status(400).json({ error: 'Set the account to verified, rejected or pending.' });
+    return res.status(400).json({ error: 'Set the account to verified, needing more details, or pending.' });
   }
   account.status = status;
   account.reviewNote = String((req.body && req.body.note) || '').slice(0, 500);
@@ -528,8 +677,8 @@ app.post('/api/admin/accounts/:id/review', requireAuth('admin'), (req, res) => {
     });
   } else if (status === 'rejected') {
     push.sendTo(account.id, {
-      title: 'Account not verified',
-      body: account.reviewNote || 'Visit the store with your ID to sort this out.',
+      title: 'Your account needs more details',
+      body: account.reviewNote || 'The store needs a clearer or different ID photo before they can verify you.',
       url: '/customer',
       tag: 'account',
     });
@@ -608,13 +757,17 @@ app.post('/api/admin/orders/:id/assign', requireAuth('admin'), (req, res) => {
   if (!rider || rider.role !== 'rider' || rider.status !== 'active') {
     return res.status(400).json({ error: 'Pick an active rider.' });
   }
+  const otherCandidates = (order.offeredTo || []).filter((id) => id !== rider.id);
   order.riderId = rider.id;
   order.assignedAt = new Date().toISOString();
   if (order.status === 'pending') order.status = 'assigned';
-  order.deliveryFee = Number(req.body.deliveryFee) || order.deliveryFee || 0;
+  order.offeredTo = [];
   pushTimeline(order, 'assigned', req.account.id);
   db.save('orders');
   broadcastOrder(order);
+  for (const riderId of otherCandidates) {
+    io.to(`user:${riderId}`).emit('rider:offerClosed', { orderId: order.id });
+  }
   io.to(`user:${rider.id}`).emit('rider:newJob', orderView(order, rider));
   push.sendTo(rider.id, {
     title: 'New booking assigned to you',
@@ -677,7 +830,7 @@ app.post('/api/push/unsubscribe', requireAuth(), (req, res) => {
 // ==========================================================================
 
 let lastGeocodeAt = 0;
-app.get('/api/geocode', requireAuth(), async (req, res) => {
+async function geocode(req, res) {
   const q = String(req.query.q || '').trim();
   if (q.length < 3) return res.json({ results: [] });
   const wait = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
@@ -692,6 +845,28 @@ app.get('/api/geocode', requireAuth(), async (req, res) => {
     });
   } catch (err) {
     res.status(502).json({ error: 'Address search is unavailable. Drop a pin on the map instead.' });
+  }
+}
+
+app.get('/api/geocode', requireAuth(), geocode);
+// Unauthenticated variant so the registration form's map can search before
+// an account exists. Same shared rate limit, so this adds no extra load.
+app.get('/api/geocode/public', geocode);
+
+app.get('/api/geocode/reverse', requireAuth(), async (req, res) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return res.status(400).json({ error: 'Bad coordinates.' });
+  const wait = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
+  if (wait) await new Promise((r) => setTimeout(r, wait));
+  lastGeocodeAt = Date.now();
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'Unamove/0.1 (self-hosted booking app)' } });
+    const data = await r.json();
+    res.json({ label: data && data.display_name ? data.display_name : '' });
+  } catch (err) {
+    res.status(502).json({ error: 'Could not look up that location.' });
   }
 });
 

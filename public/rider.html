@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Unamove — rider</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#12231d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Unamove" />
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .gps {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: var(--ink); color: var(--card); padding: 14px 16px; border-radius: var(--r);
+  }
+  .gps .lbl-big { font-family: var(--display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; font-size: 14px; }
+  .gps .fix { font-family: var(--mono); font-size: 11px; color: #a9bcb2; }
+  .gps .spacer { flex: 1; }
+  .offer-overlay {
+    position: fixed; inset: 0; background: rgba(18, 35, 29, 0.55);
+    display: flex; align-items: flex-end; justify-content: center; z-index: 900; padding: 16px;
+  }
+  @media (min-width: 640px) { .offer-overlay { align-items: center; } }
+  .offer-card { background: var(--card); border-radius: var(--r); max-width: 420px; width: 100%; overflow: hidden; box-shadow: var(--shadow); }
+  .offer-card .head { background: var(--ink); color: var(--card); padding: 14px 18px; font-family: var(--display); text-transform: uppercase; letter-spacing: 0.1em; font-size: 13px; }
+  .offer-card .body { padding: 18px; }
+  .offer-card .actions { display: flex; gap: 10px; margin-top: 16px; }
+  .offer-card .actions button { flex: 1; }
+  .job-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="/rider">Unamove</a>
+  <span class="spacer"></span>
+  <span class="whoami" id="whoami"></span>
+  <button class="ghost sm" id="logout" style="color:#e3e7de;border-color:#3c574c">Sign out</button>
+</header>
+
+<main class="wrap stack">
+
+  <div id="pushSlot"></div>
+
+  <div class="gps">
+    <div>
+      <div class="lbl-big">Location sharing</div>
+      <div class="fix" id="gpsFix">Off. The customer cannot see you on the map.</div>
+    </div>
+    <span class="spacer"></span>
+    <button class="primary" id="gpsBtn">Start sharing</button>
+  </div>
+
+  <div id="noJob" class="empty">No booking assigned to you right now. Keep this page open.</div>
+
+  <div id="jobBody" class="cols hide">
+    <div class="stack">
+      <div class="job-tabs" id="jobTabs"></div>
+      <div class="card">
+        <div id="jobBoard"></div>
+        <div style="display:flex;gap:8px;align-items:center;margin:12px 0;flex-wrap:wrap">
+          <span id="jobStatus"></span>
+          <span class="mono" id="jobRef" style="color:var(--muted)"></span>
+        </div>
+        <div class="actions" id="jobActions"></div>
+      </div>
+
+      <div class="card">
+        <h3>Buy or bring</h3>
+        <p id="jobInstructions" style="white-space:pre-wrap;margin:0 0 8px"></p>
+        <p class="mono" id="jobBudget" style="color:var(--muted);margin:0"></p>
+      </div>
+
+      <div class="card">
+        <h3>Customer</h3>
+        <div class="item" id="customerCard"></div>
+      </div>
+
+      <div class="card">
+        <h3>Route</h3>
+        <div id="jobMap" class="map"></div>
+      </div>
+    </div>
+
+    <div class="card card-flush">
+      <div class="chat-head" id="chatHead"></div>
+      <div class="chat-log" id="chatLog"></div>
+      <form class="chat-form" id="chatForm">
+        <input id="chatInput" placeholder="Message the customer…" autocomplete="off" maxlength="1000" />
+        <button class="primary" type="submit">Send</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="offerOverlay"></div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/push.js"></script>
+<script>
+let me = null, socket = null, job = null, jobMap = null, chatMessages = [];
+let watchId = null, sent = 0, jobPins = null;
+let offers = []; // pending offers not yet accepted/declined, oldest first
+let openJobs = []; // this rider's own accepted jobs
+const OPEN = ['assigned', 'accepted', 'picked_up', 'in_transit'];
+
+const NEXT = {
+  assigned: { status: 'accepted', label: 'Accept this booking' },
+  accepted: { status: 'picked_up', label: 'I bought the items' },
+  picked_up: { status: 'in_transit', label: 'On the way to drop-off' },
+  in_transit: { status: 'delivered', label: 'Mark delivered' },
+};
+
+(async function start() {
+  me = await requireRole('rider');
+  if (!me) return;
+  wireLogout();
+  jobMap = makeMap('jobMap');
+  jobPins = L.layerGroup().addTo(jobMap);
+  socket = io();
+  socket.on('order:update', () => loadJobs());
+  socket.on('rider:newJob', () => { toast('Admin assigned you a booking.'); loadJobs(); });
+  socket.on('rider:offer', (order) => {
+    if (offers.some((o) => o.id === order.id)) return;
+    offers.push(order);
+    renderOffers();
+  });
+  socket.on('rider:offerClosed', ({ orderId }) => {
+    offers = offers.filter((o) => o.id !== orderId);
+    renderOffers();
+  });
+  socket.on('chat:message', (m) => {
+    if (!job || m.orderId !== job.id) return;
+    chatMessages.push(m);
+    renderChat($('#chatLog'), chatMessages, me.id);
+  });
+  mountPushControl('Get told the moment a booking opens up nearby, even with the app closed.');
+  await loadJobs();
+})();
+
+/* ---------------- Offers ---------------- */
+
+function renderOffers() {
+  const overlay = $('#offerOverlay');
+  const current = offers[0];
+  if (!current) { overlay.innerHTML = ''; return; }
+  overlay.innerHTML = `<div class="offer-overlay">
+    <div class="offer-card">
+      <div class="head">New booking${offers.length > 1 ? ` · 1 of ${offers.length} waiting` : ''}</div>
+      <div class="body">
+        ${routeBoard(current)}
+        <dl style="margin:12px 0 0">
+          <dt>Buy from</dt><dd>${esc(current.pickup.label)}</dd>
+          <dt>Deliver to</dt><dd>${esc(current.dropoff.label)}</dd>
+        </dl>
+        <p style="margin:12px 0 0;white-space:pre-wrap">${esc(current.instructions)}</p>
+        <p class="mono" style="color:var(--muted);margin:10px 0 0">
+          ${current.budget ? esc(peso(current.budget)) + ' budget · ' : ''}pays by ${current.paymentMethod === 'gcash' ? 'GCash' : 'cash'} · fee from ${esc(peso(current.deliveryFee || 40))}
+        </p>
+        <div class="actions">
+          <button class="ghost" id="offerDecline">Skip</button>
+          <button class="primary" id="offerAccept">Accept</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  $('#offerAccept').onclick = async () => {
+    $('#offerAccept').disabled = true;
+    try {
+      await api(`/api/orders/${current.id}/accept-offer`, { method: 'POST' });
+      offers = offers.filter((o) => o.id !== current.id);
+      renderOffers();
+      toast('Booking accepted.');
+      await loadJobs();
+    } catch (err) {
+      toast(err.message, true);
+      offers = offers.filter((o) => o.id !== current.id);
+      renderOffers();
+    }
+  };
+  $('#offerDecline').onclick = async () => {
+    try { await api(`/api/orders/${current.id}/decline-offer`, { method: 'POST' }); } catch (_) { /* best-effort */ }
+    offers = offers.filter((o) => o.id !== current.id);
+    renderOffers();
+  };
+}
+
+/* ---------------- GPS ---------------- */
+
+$('#gpsBtn').onclick = () => (watchId === null ? startGps() : stopGps());
+
+function startGps() {
+  if (!socket || !socket.connected) {
+    toast('Still connecting. Try again in a second.', true);
+    return;
+  }
+  if (!navigator.geolocation) {
+    toast('This phone or browser cannot share location.', true);
+    return;
+  }
+  watchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      const c = pos.coords;
+      socket.emit('rider:location', {
+        lat: c.latitude,
+        lng: c.longitude,
+        accuracy: c.accuracy,
+        heading: c.heading,
+        speed: c.speed,
+      });
+      sent += 1;
+      $('#gpsFix').textContent =
+        `On · ${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)} · ±${Math.round(c.accuracy)} m · ${sent} update${sent === 1 ? '' : 's'} sent`;
+    },
+    (err) => {
+      stopGps();
+      const reason = err.code === 1
+        ? 'Location is blocked. Allow it in your browser settings, then start again.'
+        : 'Could not get a GPS fix. Move outdoors and try again.';
+      toast(reason, true);
+    },
+    { enableHighAccuracy: true, maximumAge: 4000, timeout: 20000 }
+  );
+  $('#gpsBtn').textContent = 'Stop sharing';
+  $('#gpsBtn').className = 'danger';
+  $('#gpsFix').textContent = 'Getting your first GPS fix…';
+}
+
+function stopGps() {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+  sent = 0;
+  $('#gpsBtn').textContent = 'Start sharing';
+  $('#gpsBtn').className = 'primary';
+  $('#gpsFix').textContent = 'Off. The customer cannot see you on the map.';
+}
+
+window.addEventListener('beforeunload', stopGps);
+
+/* ---------------- Jobs ---------------- */
+
+async function loadJobs() {
+  const { orders } = await api('/api/orders');
+  openJobs = orders.filter((o) => OPEN.includes(o.status)).sort((a, b) => a.assignedAt.localeCompare(b.assignedAt));
+  // Stay on whichever job is already open; default to the oldest (first up).
+  const current = openJobs.find((o) => job && o.id === job.id) || openJobs[0] || null;
+
+  $('#noJob').classList.toggle('hide', Boolean(current));
+  $('#jobBody').classList.toggle('hide', !current);
+  renderJobTabs(current);
+
+  if (current) {
+    if (!job || job.id !== current.id) {
+      socket.emit('order:join', { orderId: current.id }, (res) => {
+        if (res.error) return toast(res.error, true);
+        chatMessages = res.messages;
+        renderChat($('#chatLog'), chatMessages, me.id);
+        paintJob(res.order);
+      });
+    } else {
+      paintJob(current);
+    }
+  } else {
+    job = null;
+  }
+}
+
+function renderJobTabs(current) {
+  const tabs = $('#jobTabs');
+  if (openJobs.length < 2) { tabs.innerHTML = ''; return; }
+  tabs.innerHTML = openJobs.map((o, i) => `<button type="button" class="sm ${current && o.id === current.id ? '' : 'ghost'}" data-job="${esc(o.id)}">
+    Job ${i + 1} · ${esc(statusPillText(o.status))}
+  </button>`).join('');
+  $$('#jobTabs [data-job]').forEach((btn) => {
+    btn.onclick = () => {
+      const picked = openJobs.find((o) => o.id === btn.dataset.job);
+      if (!picked) return;
+      job = null; // force a fresh order:join so chat history loads for this job
+      socket.emit('order:join', { orderId: picked.id }, (res) => {
+        if (res.error) return toast(res.error, true);
+        chatMessages = res.messages;
+        renderChat($('#chatLog'), chatMessages, me.id);
+        paintJob(res.order);
+        renderJobTabs(res.order);
+      });
+    };
+  });
+}
+
+function statusPillText(status) {
+  return (STATUS_LABELS[status] || status).replace('Waiting for a rider', 'New');
+}
+
+function paintJob(order) {
+  job = order;
+  $('#jobBoard').innerHTML = routeBoard(order);
+  $('#jobStatus').innerHTML = statusPill(order.status);
+  $('#jobRef').textContent = order.id;
+  $('#jobInstructions').textContent = order.instructions;
+  const budgetLine = order.budget ? `Customer's stated budget: ${peso(order.budget)}` : 'No budget given. Ask in the chat.';
+  const feeLine = `Delivery fee starts at ${peso(order.deliveryFee || 40)} plus items — confirm the exact total in chat.`;
+  const paymentLine = `Pays by ${order.paymentMethod === 'gcash' ? 'GCash' : 'cash'}.`;
+  $('#jobBudget').innerHTML = `${esc(budgetLine)}<br>${esc(feeLine)}<br>${esc(paymentLine)}`;
+
+  const step = NEXT[order.status];
+  $('#jobActions').innerHTML = [
+    step ? `<button class="primary" id="advance">${esc(step.label)}</button>` : '',
+    order.status === 'assigned' ? '<button class="ghost" id="decline">Hand back to admin</button>' : '',
+  ].join('');
+
+  const advance = $('#advance');
+  if (advance) advance.onclick = async () => {
+    advance.disabled = true;
+    try {
+      await api(`/api/orders/${order.id}/status`, { body: { status: step.status } });
+      await loadJobs();
+    } catch (err) { toast(err.message, true); advance.disabled = false; }
+  };
+  const decline = $('#decline');
+  if (decline) decline.onclick = async () => {
+    if (!confirm('Hand this booking back to admin?')) return;
+    try {
+      await api(`/api/orders/${order.id}/decline`, { method: 'POST' });
+      job = null;
+      await loadJobs();
+    } catch (err) { toast(err.message, true); }
+  };
+
+  $('#customerCard').innerHTML = order.customer
+    ? `<div class="top"><span class="name">${esc(order.customer.fullName)}</span><span class="pill">Customer</span></div>
+       <dl>
+         <dt>Mobile</dt><dd>${esc(order.customer.phone || '—')}</dd>
+         <dt>Deliver to</dt><dd>${esc(order.dropoff.label)}</dd>
+         <dt>Buy from</dt><dd>${esc(order.pickup.label)}</dd>
+       </dl>`
+    : '<p style="margin:0">Customer details unavailable.</p>';
+
+  $('#chatHead').innerHTML = `
+    <div class="who"><span>You, the rider in charge</span>${esc(me.fullName)}</div>
+    <div class="who"><span>Customer</span>${order.customer ? esc(order.customer.fullName) : '—'}</div>
+    <div class="who"><span>Also in this chat</span>Store admin</div>`;
+
+  jobPins.clearLayers();
+  ['pickup', 'dropoff'].forEach((key, i) => {
+    const p = order[key];
+    if (p && Number.isFinite(p.lat)) {
+      jobPins.addLayer(
+        L.marker([p.lat, p.lng], { icon: pinIcon(i ? 'D' : 'P', i ? '#ffffff' : '#f5850c') }).bindTooltip(p.label)
+      );
+    }
+  });
+  const first = [order.pickup, order.dropoff].find((p) => p && Number.isFinite(p.lat));
+  if (first) jobMap.setView([first.lat, first.lng], 15);
+  jobMap.invalidateSize();
+}
+
+$('#chatForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('#chatInput');
+  const text = input.value.trim();
+  if (!text || !job) return;
+  socket.emit('chat:send', { orderId: job.id, text }, (res) => {
+    if (res && res.error) toast(res.error, true);
+  });
+  input.value = '';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Unamove — admin</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#12231d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Unamove" />
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .verify-grid { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 640px) { .verify-grid { grid-template-columns: 1fr; } }
+  .assign-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .assign-row select { width: auto; min-width: 190px; }
+  .fleet-legend { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="/admin">Unamove</a>
+  <span class="eyebrow" style="color:var(--signal)">Admin console</span>
+  <span class="spacer"></span>
+  <span class="whoami" id="whoami"></span>
+  <button class="ghost sm" id="logout" style="color:#e3e7de;border-color:#3c574c">Sign out</button>
+</header>
+
+<main class="wrap">
+  <div id="pushSlot" style="margin-bottom:16px"></div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" data-panel="verify" aria-selected="true">Verifications <span id="pendingCount"></span></button>
+    <button class="tab" data-panel="riders" aria-selected="false">Riders</button>
+    <button class="tab" data-panel="bookings" aria-selected="false">Bookings</button>
+    <button class="tab" data-panel="fleet" aria-selected="false">Fleet map</button>
+  </div>
+
+  <!-- ============ VERIFY ============ -->
+  <section data-panel="verify" class="stack">
+    <div class="notice">
+      <strong>Check every account by hand</strong>
+      Compare the ID photo, the name, and the Facebook profile. Nothing here is automatic — that is on purpose.
+    </div>
+    <div class="actions">
+      <button class="sm" data-filter="pending">Pending</button>
+      <button class="ghost sm" data-filter="verified">Verified</button>
+      <button class="ghost sm" data-filter="rejected">Needs more details</button>
+    </div>
+    <div class="list" id="verifyList"></div>
+  </section>
+
+  <!-- ============ RIDERS ============ -->
+  <section data-panel="riders" class="cols hide">
+    <div class="stack">
+      <h2>Registered riders</h2>
+      <div class="list" id="riderList"></div>
+    </div>
+    <form class="card" id="riderForm">
+      <h3>Register a rider</h3>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 14px">
+        Riders cannot sign up on their own. Fill this in while they are standing in front of you.
+      </p>
+      <div class="row">
+        <label><span class="lbl">Username</span><input name="username" required autocomplete="off" /></label>
+        <label><span class="lbl">Password</span><input name="password" minlength="8" required autocomplete="new-password" /></label>
+      </div>
+      <label><span class="lbl">Full name</span><input name="fullName" required /></label>
+      <div class="row">
+        <label><span class="lbl">Mobile number</span><input name="phone" required /></label>
+        <label><span class="lbl">Age</span><input name="age" type="number" min="18" max="90" /></label>
+      </div>
+      <div class="row">
+        <label><span class="lbl">Plate number</span><input name="plateNumber" required placeholder="ABC 1234" /></label>
+        <label><span class="lbl">Vehicle</span><input name="vehicle" value="Motorcycle" /></label>
+      </div>
+      <label><span class="lbl">Driver's licence no.</span><input name="licenseNumber" /></label>
+      <label><span class="lbl">Address</span><textarea name="address"></textarea></label>
+      <button class="primary" type="submit" style="width:100%">Register rider</button>
+    </form>
+  </section>
+
+  <!-- ============ BOOKINGS ============ -->
+  <section data-panel="bookings" class="cols hide">
+    <div class="stack">
+      <h2>All bookings</h2>
+      <div class="list" id="orderList"></div>
+    </div>
+    <div class="card card-flush" id="adminChat">
+      <div class="chat-head" id="chatHead"><div class="who"><span>Chat</span>Open a booking to read it</div></div>
+      <div class="chat-log" id="chatLog"></div>
+      <form class="chat-form" id="chatForm">
+        <input id="chatInput" placeholder="Message both of them…" autocomplete="off" maxlength="1000" disabled />
+        <button class="primary" type="submit" disabled>Send</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============ FLEET ============ -->
+  <section data-panel="fleet" class="stack hide">
+    <h2>Where the riders are</h2>
+    <p class="fleet-legend">Pins move as riders send GPS fixes. A rider only appears once they turn on location sharing.</p>
+    <div id="fleetMap" class="map tall"></div>
+    <div class="list" id="fleetList"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/push.js"></script>
+<script>
+let me = null, socket = null, fleetMap = null, openChatId = null, chatMessages = [];
+let riders = [], orders = [], verifyFilter = 'pending';
+const fleetMarkers = new Map();
+const OPEN = ['pending', 'assigned', 'accepted', 'picked_up', 'in_transit'];
+
+$$('.tab').forEach((tab) => {
+  tab.onclick = () => {
+    $$('.tab').forEach((t) => t.setAttribute('aria-selected', t === tab));
+    $$('section[data-panel]').forEach((s) => s.classList.toggle('hide', s.dataset.panel !== tab.dataset.panel));
+    if (tab.dataset.panel === 'fleet' && fleetMap) { loadFleet(); fleetMap.invalidateSize(); }
+  };
+});
+
+(async function start() {
+  me = await requireRole('admin');
+  if (!me) return;
+  wireLogout();
+  fleetMap = makeMap('fleetMap', PH_CENTER, 12);
+  socket = io();
+  socket.on('admin:newSignup', () => { toast('New customer signed up.'); loadVerify(); });
+  socket.on('admin:reupload', () => { toast('Customer resubmitted their ID.'); loadVerify(); });
+  socket.on('admin:newOrder', () => { toast('New booking came in.'); loadOrders(); });
+  socket.on('order:update', () => loadOrders());
+  socket.on('fleet:location', (fix) => placeRider(fix));
+  socket.on('fleet:presence', () => loadFleet());
+  socket.on('chat:message', (m) => {
+    if (m.orderId !== openChatId) return;
+    chatMessages.push(m);
+    renderChat($('#chatLog'), chatMessages, me.id);
+  });
+  mountPushControl('Get told when a booking comes in or someone signs up needing verification.');
+  await Promise.all([loadVerify(), loadRiders(), loadOrders()]);
+})();
+
+/* ============ Verifications ============ */
+
+$$('[data-filter]').forEach((btn) => {
+  btn.onclick = () => {
+    verifyFilter = btn.dataset.filter;
+    $$('[data-filter]').forEach((b) => (b.className = b === btn ? 'sm' : 'ghost sm'));
+    loadVerify();
+  };
+});
+
+async function loadVerify() {
+  const { accounts } = await api(`/api/admin/accounts?role=customer&status=${verifyFilter}`);
+  if (verifyFilter === 'pending') {
+    $('#pendingCount').textContent = accounts.length ? `(${accounts.length})` : '';
+  }
+  $('#verifyList').innerHTML = accounts.length
+    ? accounts.map((a) => `
+      <div class="item">
+        <div class="verify-grid">
+          <div>
+            ${a.hasIdPhoto
+              ? `<img class="idshot" src="/api/admin/id-photo/${esc(a.id)}" alt="ID photo submitted by ${esc(a.fullName)}" loading="lazy" />`
+              : '<div class="empty" style="padding:14px">No ID on file</div>'}
+          </div>
+          <div class="stack" style="gap:10px">
+            <div class="top">
+              <span class="name">${esc(a.fullName)}</span>
+              <span class="pill ${a.status === 'verified' ? 'good' : a.status === 'rejected' ? 'warn' : ''}">${esc(a.status === 'rejected' ? 'needs more details' : a.status)}</span>
+            </div>
+            <dl>
+              <dt>Username</dt><dd class="mono">${esc(a.username)}</dd>
+              <dt>Age</dt><dd>${esc(a.age)}</dd>
+              <dt>Mobile</dt><dd>${esc(a.phone)}</dd>
+              <dt>Address</dt><dd>${esc(a.address)}</dd>
+              <dt>Facebook</dt><dd>${a.facebookLink ? `<a href="${esc(a.facebookLink)}" target="_blank" rel="noopener noreferrer">${esc(a.facebookLink)}</a>` : 'Not given'}</dd>
+              <dt>Signed up</dt><dd>${timeOf(a.createdAt)}</dd>
+              ${a.reviewNote ? `<dt>Note</dt><dd>${esc(a.reviewNote)}</dd>` : ''}
+            </dl>
+            <label style="margin:0"><span class="lbl">Note for the customer</span>
+              <input data-note="${esc(a.id)}" placeholder="What's missing or needs fixing? Shown to them so they can resubmit." /></label>
+            <div class="actions">
+              <button class="primary sm" data-verify="${esc(a.id)}">Mark verified</button>
+              <button class="danger sm" data-reject="${esc(a.id)}">Needs more details</button>
+              <button class="ghost sm" data-suspend="${esc(a.id)}">${a.status === 'suspended' ? 'Lift suspension' : 'Suspend'}</button>
+            </div>
+          </div>
+        </div>
+      </div>`).join('')
+    : '<div class="empty">Nothing to review here.</div>';
+
+  $$('[data-verify]').forEach((b) => (b.onclick = () => review(b.dataset.verify, 'verified')));
+  $$('[data-reject]').forEach((b) => (b.onclick = () => review(b.dataset.reject, 'rejected')));
+  $$('[data-suspend]').forEach((b) => (b.onclick = async () => {
+    await api(`/api/admin/accounts/${b.dataset.suspend}/suspend`, { method: 'POST' });
+    loadVerify();
+  }));
+}
+
+async function review(id, status) {
+  const note = $(`[data-note="${id}"]`);
+  try {
+    await api(`/api/admin/accounts/${id}/review`, { body: { status, note: note ? note.value : '' } });
+    toast(status === 'verified' ? 'Customer verified.' : 'Sent back for more details.');
+    loadVerify();
+  } catch (err) { toast(err.message, true); }
+}
+
+/* ============ Riders ============ */
+
+async function loadRiders() {
+  const { accounts } = await api('/api/admin/accounts?role=rider');
+  riders = accounts;
+  $('#riderList').innerHTML = accounts.length
+    ? accounts.map((r) => `<div class="item">
+        <div class="top">
+          <span class="name">${esc(r.fullName)}</span>
+          <span class="pill ${r.isOnline ? 'live dot' : ''}">${r.isOnline ? 'Online' : 'Offline'}</span>
+        </div>
+        <dl>
+          <dt>Plate</dt><dd class="mono">${esc(r.plateNumber)}</dd>
+          <dt>Username</dt><dd class="mono">${esc(r.username)}</dd>
+          <dt>Mobile</dt><dd>${esc(r.phone)}</dd>
+          <dt>Vehicle</dt><dd>${esc(r.vehicle || '—')}</dd>
+          <dt>Licence</dt><dd class="mono">${esc(r.licenseNumber || '—')}</dd>
+          <dt>Status</dt><dd>${esc(r.status)}</dd>
+        </dl>
+        <div class="actions"><button class="ghost sm" data-suspend-rider="${esc(r.id)}">${r.status === 'suspended' ? 'Reactivate' : 'Suspend'}</button></div>
+      </div>`).join('')
+    : '<div class="empty">No riders registered yet.</div>';
+
+  $$('[data-suspend-rider]').forEach((b) => (b.onclick = async () => {
+    await api(`/api/admin/accounts/${b.dataset.suspendRider}/suspend`, { method: 'POST' });
+    loadRiders();
+  }));
+}
+
+$('#riderForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = Object.fromEntries(new FormData(e.target));
+  try {
+    await api('/api/admin/riders', { body: form });
+    e.target.reset();
+    toast('Rider registered. Give them the username and password.');
+    loadRiders();
+  } catch (err) { toast(err.message, true); }
+});
+
+/* ============ Bookings ============ */
+
+async function loadOrders() {
+  const res = await api('/api/admin/orders');
+  orders = res.orders;
+  $('#orderList').innerHTML = orders.length
+    ? orders.map((o) => {
+        const options = riders
+          .filter((r) => r.status === 'active')
+          .map((r) => `<option value="${esc(r.id)}" ${o.riderId === r.id ? 'selected' : ''}>${esc(r.fullName)} · ${esc(r.plateNumber)}${r.isOnline ? ' · online' : ''}</option>`)
+          .join('');
+        return `<div class="item">
+          ${routeBoard(o, true)}
+          <div class="top">${statusPill(o.status)}<span class="mono">${esc(o.id)}</span></div>
+          <dl>
+            <dt>Customer</dt><dd>${o.customer ? esc(o.customer.fullName) + ' · ' + esc(o.customer.phone || '') : '—'}</dd>
+            <dt>Buy from</dt><dd>${esc(o.pickup.label)}</dd>
+            <dt>Deliver to</dt><dd>${esc(o.dropoff.label)}</dd>
+            <dt>Rider</dt><dd>${o.rider ? esc(o.rider.fullName) + ' · ' + esc(o.rider.plateNumber || '') : (o.status === 'pending' ? `Offered to ${o.offerCount || 0} riders automatically` : 'Not assigned')}</dd>
+            <dt>Asked for</dt><dd>${esc(o.instructions)}</dd>
+            <dt>Budget</dt><dd>${o.budget ? esc(peso(o.budget)) : 'Not given'}</dd>
+            <dt>Payment</dt><dd>${o.paymentMethod === 'gcash' ? 'GCash' : 'Cash'} · delivery fee from ${esc(peso(o.deliveryFee || 40))}</dd>
+            <dt>Booked</dt><dd>${timeOf(o.createdAt)}</dd>
+          </dl>
+          ${OPEN.includes(o.status) ? `<div class="assign-row">
+            <select data-rider-for="${esc(o.id)}"><option value="">Assign manually…</option>${options}</select>
+            <button class="primary sm" data-assign="${esc(o.id)}">${o.riderId ? 'Reassign' : 'Assign'}</button>
+            <button class="ghost sm" data-chat="${esc(o.id)}">Open chat</button>
+            <button class="danger sm" data-cancel="${esc(o.id)}">Cancel</button>
+          </div>` : `<div class="assign-row"><button class="ghost sm" data-chat="${esc(o.id)}">Read chat</button></div>`}
+        </div>`;
+      }).join('')
+    : '<div class="empty">No bookings yet.</div>';
+
+  $$('[data-assign]').forEach((b) => (b.onclick = async () => {
+    const id = b.dataset.assign;
+    const riderId = $(`[data-rider-for="${id}"]`).value;
+    if (!riderId) return toast('Choose a rider first.', true);
+    try {
+      await api(`/api/admin/orders/${id}/assign`, { body: { riderId } });
+      toast('Rider assigned.');
+      loadOrders();
+    } catch (err) { toast(err.message, true); }
+  }));
+
+  $$('[data-cancel]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Cancel this booking?')) return;
+    try {
+      await api(`/api/orders/${b.dataset.cancel}/cancel`, { body: { reason: 'Cancelled by admin' } });
+      loadOrders();
+    } catch (err) { toast(err.message, true); }
+  }));
+
+  $$('[data-chat]').forEach((b) => (b.onclick = () => openChat(b.dataset.chat)));
+}
+
+function openChat(orderId) {
+  socket.emit('order:join', { orderId }, (res) => {
+    if (res.error) return toast(res.error, true);
+    openChatId = orderId;
+    chatMessages = res.messages;
+    const o = res.order;
+    $('#chatHead').innerHTML = `
+      <div class="who"><span>Customer</span>${o.customer ? esc(o.customer.fullName) : '—'}</div>
+      <div class="who"><span>Rider in charge</span>${o.rider ? esc(o.rider.fullName) : 'Not assigned'}</div>
+      <div class="who"><span>Booking</span>${esc(o.id)}</div>`;
+    renderChat($('#chatLog'), chatMessages, me.id);
+    $('#chatInput').disabled = false;
+    $('#chatForm button').disabled = false;
+  });
+}
+
+$('#chatForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('#chatInput');
+  const text = input.value.trim();
+  if (!text || !openChatId) return;
+  socket.emit('chat:send', { orderId: openChatId, text }, (res) => {
+    if (res && res.error) toast(res.error, true);
+  });
+  input.value = '';
+});
+
+/* ============ Fleet ============ */
+
+async function loadFleet() {
+  const { riders: fleet } = await api('/api/admin/fleet');
+  $('#fleetList').innerHTML = fleet.length
+    ? fleet.map((r) => `<div class="item">
+        <div class="top">
+          <span class="name">${esc(r.fullName)} · <span class="mono">${esc(r.plateNumber)}</span></span>
+          <span class="pill ${r.isOnline ? 'live dot' : ''}">${r.isOnline ? 'Sharing location' : 'Offline'}</span>
+        </div>
+        <dl>
+          <dt>Open jobs</dt><dd>${r.activeOrders}</dd>
+          <dt>Last fix</dt><dd class="mono">${r.location ? `${r.location.lat.toFixed(5)}, ${r.location.lng.toFixed(5)} · ${timeOf(r.location.at)}` : 'None yet'}</dd>
+        </dl>
+      </div>`).join('')
+    : '<div class="empty">No active riders.</div>';
+
+  fleet.forEach((r) => {
+    if (r.location) placeRider({ ...r.location, riderId: r.id, name: r.fullName, plate: r.plateNumber });
+  });
+}
+
+function placeRider(fix) {
+  const rider = riders.find((r) => r.id === fix.riderId);
+  const label = `${(rider && rider.fullName) || fix.name || 'Rider'} · ${(rider && rider.plateNumber) || fix.plate || ''}`;
+  const pos = [fix.lat, fix.lng];
+  let marker = fleetMarkers.get(fix.riderId);
+  if (!marker) {
+    marker = L.marker(pos, { icon: riderIcon }).addTo(fleetMap);
+    fleetMarkers.set(fix.riderId, marker);
+  } else {
+    marker.setLatLng(pos);
+  }
+  marker.bindTooltip(`${label}<br>${timeOf(fix.at)}`, { direction: 'top', offset: [0, -10] });
+}
+</script>
+</body>
+</html>

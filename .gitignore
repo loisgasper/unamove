@@ -1,0 +1,5 @@
+node_modules/
+private_uploads/*
+!private_uploads/.gitkeep
+data/*.json
+data/*.json.tmp

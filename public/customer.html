@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Unamove — my bookings</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#12231d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Unamove" />
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .picker-modes { display: flex; gap: 6px; margin-bottom: 10px; }
+  .search-row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .search-row input { flex: 1; }
+  .results { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 4px; }
+  .results li button { width: 100%; text-align: left; font-family: var(--body); font-size: 13px; letter-spacing: 0; text-transform: none; background: #fff; color: var(--ink); border-color: var(--line); padding: 7px 10px; }
+  .loc-suggest { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 10px; }
+  .loc-suggest .txt { flex: 1; min-width: 200px; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="/customer">Unamove</a>
+  <span class="spacer"></span>
+  <span class="whoami" id="whoami"></span>
+  <button class="ghost sm" id="logout" style="color:#e3e7de;border-color:#3c574c">Sign out</button>
+</header>
+
+<main class="wrap">
+  <div id="statusBanner"></div>
+  <div id="pushSlot" style="margin-top:12px"></div>
+
+  <div class="tabs" role="tablist" style="margin-top:16px">
+    <button class="tab" data-panel="track" aria-selected="true">Track</button>
+    <button class="tab" data-panel="book" aria-selected="false">New booking</button>
+    <button class="tab" data-panel="history" aria-selected="false">History</button>
+  </div>
+
+  <!-- ================= TRACK ================= -->
+  <section data-panel="track">
+    <div id="trackEmpty" class="empty">No booking in progress. Open <b>New booking</b> to send a rider out.</div>
+
+    <div id="trackBody" class="cols hide">
+      <div class="stack">
+        <div class="card">
+          <div id="activeBoard"></div>
+          <div style="display:flex;gap:8px;align-items:center;margin:12px 0;flex-wrap:wrap">
+            <span id="activeStatus"></span>
+            <span class="mono" id="activeRef" style="color:var(--muted)"></span>
+            <span class="spacer" style="flex:1"></span>
+            <button class="ghost sm" id="cancelBtn">Cancel booking</button>
+          </div>
+          <div id="activeMap" class="map"></div>
+          <p class="hint" id="fixNote" style="font-size:12px;color:var(--muted);margin:8px 0 0"></p>
+        </div>
+
+        <div class="card">
+          <h3>What I asked for</h3>
+          <p id="activeInstructions" style="white-space:pre-wrap;margin:0 0 8px"></p>
+          <p id="activePayment" style="font-size:13px;color:var(--muted);margin:0 0 12px"></p>
+          <div class="item" id="riderCard"></div>
+        </div>
+
+        <div class="card">
+          <h3>Progress</h3>
+          <div id="activeTimeline"></div>
+        </div>
+      </div>
+
+      <div class="card card-flush">
+        <div class="chat-head" id="chatHead"></div>
+        <div class="chat-log" id="chatLog"></div>
+        <form class="chat-form" id="chatForm">
+          <input id="chatInput" placeholder="Type your instructions…" autocomplete="off" maxlength="1000" />
+          <button class="primary" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= BOOK ================= -->
+  <section data-panel="book" class="hide">
+    <form class="card" id="bookForm">
+      <h2>New booking</h2>
+      <label>
+        <span class="lbl">Buy from / pick up at</span>
+        <input name="pickupLabel" required placeholder="Aling Nena sari-sari store, Purok 2" />
+      </label>
+      <label>
+        <span class="lbl">Deliver to</span>
+        <input name="dropoffLabel" required placeholder="Blue gate beside the basketball court" />
+      </label>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 10px">
+        Search for it below or tap the map to drop a pin. This is how the rider finds you, so get it as close as you can.
+      </p>
+      <div id="locSuggest"></div>
+      <div class="search-row">
+        <input id="searchInput" placeholder="Search an address or landmark" />
+        <button type="button" class="ghost sm" id="searchBtn">Find</button>
+      </div>
+      <ul class="results" id="searchResults"></ul>
+      <div id="pickMap" class="map" style="margin-bottom:16px"></div>
+      <label>
+        <span class="lbl">What should the rider buy or bring?</span>
+        <textarea name="instructions" required placeholder="1 kilo rice, 2 Kopiko, 1 Milo sachet. Bayad muna, ibabalik ko."></textarea>
+      </label>
+      <label>
+        <span class="lbl">Budget for the items (optional)</span>
+        <input name="budget" type="number" min="0" step="1" placeholder="300" />
+      </label>
+      <label>
+        <span class="lbl">How will you pay?</span>
+        <div class="picker-modes" id="paymentPicker">
+          <button type="button" class="sm" data-payment="cash">Cash</button>
+          <button type="button" class="ghost sm" data-payment="gcash">GCash</button>
+        </div>
+        <input type="hidden" name="paymentMethod" id="paymentMethod" value="cash" required />
+      </label>
+      <p class="hint" style="margin:0 0 14px">
+        Delivery fee starts at ₱40 plus the item cost. Agree on the exact total with your rider in the chat once they are on it.
+      </p>
+      <button class="primary" type="submit" style="width:100%">Send booking to admin</button>
+    </form>
+  </section>
+
+  <!-- ================= HISTORY ================= -->
+  <section data-panel="history" class="hide">
+    <div class="list" id="historyList"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/push.js"></script>
+<script>
+let me = null, socket = null, active = null;
+let pickMap, activeMap, tracker, dropoffMarker = null;
+let activePins = null;
+let mapsReady = false;
+
+const OPEN = ['pending', 'assigned', 'accepted', 'picked_up', 'in_transit'];
+
+/* ---------- tabs ---------- */
+$$('.tab').forEach((tab) => {
+  tab.onclick = () => {
+    $$('.tab').forEach((t) => t.setAttribute('aria-selected', t === tab));
+    $$('section[data-panel]').forEach((s) => s.classList.toggle('hide', s.dataset.panel !== tab.dataset.panel));
+    if (pickMap) pickMap.invalidateSize();
+    if (activeMap) activeMap.invalidateSize();
+  };
+});
+
+/* ---------- boot ---------- */
+(async function start() {
+  me = await requireRole('customer');
+  if (!me) return;
+  wireLogout();
+  renderBanner();
+  setupMaps();
+  socket = io();
+  socket.on('connect_error', () => toast('Lost the connection. Reload the page.', true));
+  socket.on('order:update', (order) => {
+    if (active && order.id === active.id) paintActive(order);
+    loadOrders();
+  });
+  socket.on('rider:location', (fix) => {
+    if (!active || fix.orderId !== active.id) return;
+    tracker.update(fix);
+    $('#fixNote').textContent = `Rider position updated ${timeOf(fix.at)}${fix.accuracy ? ` · accurate to about ${Math.round(fix.accuracy)} m` : ''}`;
+  });
+  socket.on('chat:message', (m) => {
+    if (!active || m.orderId !== active.id) return;
+    chatMessages.push(m);
+    renderChat($('#chatLog'), chatMessages, me.id);
+  });
+  socket.on('account:update', (account) => {
+    me = account;
+    renderBanner();
+    toast(account.status === 'verified' ? 'Your account is verified. You can book now.' : 'Your account status changed.');
+  });
+  mountPushControl('Get told the moment a rider takes your booking and when they message you.');
+  await loadOrders();
+})();
+
+function renderBanner() {
+  const box = $('#statusBanner');
+  if (me.status === 'verified') { box.innerHTML = ''; return; }
+  if (me.status === 'pending') {
+    box.innerHTML = `<div class="notice"><strong>Waiting for verification</strong>
+      Someone at the store is checking your ID by hand. You can look around, but bookings open once you are verified.</div>`;
+  } else if (me.status === 'rejected') {
+    box.innerHTML = `<div class="notice bad">
+      <strong>Needs more details</strong>
+      ${esc(me.reviewNote || 'The store needs a clearer or different ID photo before they can verify you.')}
+      <form id="reuploadForm" enctype="multipart/form-data" style="margin-top:12px">
+        <label>
+          <span class="lbl">Upload a new photo of your ID</span>
+          <input name="idPhoto" type="file" accept="image/*" required />
+        </label>
+        <button class="primary sm" type="submit" style="margin-top:8px">Resubmit for review</button>
+      </form>
+    </div>`;
+    $('#reuploadForm').addEventListener('submit', onReupload);
+  } else {
+    box.innerHTML = `<div class="notice bad"><strong>Account suspended</strong> Visit the store to sort this out.</div>`;
+  }
+}
+
+async function onReupload(e) {
+  e.preventDefault();
+  const form = e.target;
+  const btn = form.querySelector('button');
+  btn.disabled = true;
+  try {
+    const { account } = await api('/api/account/reupload', { method: 'POST', body: new FormData(form) });
+    me = account;
+    renderBanner();
+    toast('ID resubmitted. Waiting for verification again.');
+  } catch (err) {
+    toast(err.message, true);
+    btn.disabled = false;
+  }
+}
+
+/* ---------- maps ---------- */
+function setupMaps() {
+  if (mapsReady) return;
+  mapsReady = true;
+  pickMap = makeMap('pickMap');
+  activeMap = makeMap('activeMap');
+  tracker = riderTracker(activeMap);
+  activePins = L.layerGroup().addTo(activeMap);
+
+  pickMap.on('click', (e) => setPin(e.latlng.lat, e.latlng.lng));
+
+  $('#searchBtn').onclick = runSearch;
+  $('#searchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
+  });
+
+  $$('#paymentPicker [data-payment]').forEach((btn) => {
+    btn.onclick = () => {
+      $('#paymentMethod').value = btn.dataset.payment;
+      $$('#paymentPicker [data-payment]').forEach((b) => b.className = b === btn ? 'sm' : 'ghost sm');
+    };
+  });
+
+  offerCurrentLocation();
+}
+
+function setPin(lat, lng) {
+  if (dropoffMarker) pickMap.removeLayer(dropoffMarker);
+  dropoffMarker = L.marker([lat, lng], { icon: pinIcon('D', '#ffffff') }).addTo(pickMap).bindTooltip('Drop-off');
+}
+
+function offerCurrentLocation() {
+  if (!('geolocation' in navigator)) return;
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const { latitude: lat, longitude: lng } = pos.coords;
+      let label = `Current location (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+      try {
+        const r = await api(`/api/geocode/reverse?lat=${lat}&lng=${lng}`);
+        if (r.label) label = r.label;
+      } catch (_) {
+        /* fall back to the raw coordinates as the label */
+      }
+      pickMap.setView([lat, lng], 16);
+      L.circleMarker([lat, lng], { radius: 8, color: '#2a6f4f', fillOpacity: 0.25 }).addTo(pickMap);
+
+      $('#locSuggest').innerHTML = `<div class="loc-suggest">
+        <span class="txt">Deliver to your current location? <strong>${esc(label)}</strong></span>
+        <button type="button" class="sm" id="locUse">Use this</button>
+        <button type="button" class="ghost sm" id="locDismiss">No, I'll set it myself</button>
+      </div>`;
+      $('#locUse').onclick = () => {
+        $('#bookForm [name="dropoffLabel"]').value = label;
+        setPin(lat, lng);
+        $('#locSuggest').innerHTML = '';
+      };
+      $('#locDismiss').onclick = () => { $('#locSuggest').innerHTML = ''; };
+    },
+    () => { /* permission denied or unavailable — customer just searches/taps as before */ },
+    { enableHighAccuracy: true, timeout: 8000 }
+  );
+}
+
+async function runSearch() {
+  const q = $('#searchInput').value.trim();
+  const list = $('#searchResults');
+  if (q.length < 3) { list.innerHTML = ''; return; }
+  list.innerHTML = '<li style="font-size:13px;color:var(--muted)">Searching…</li>';
+  try {
+    const { results } = await api(`/api/geocode?q=${encodeURIComponent(q)}`);
+    if (!results.length) {
+      list.innerHTML = `<li class="notice" style="font-size:13px;margin:0;padding:8px 10px">
+        <strong style="display:block;margin-bottom:2px">No exact match for that</strong>
+        Small streets, sitios and sari-sari stores are often missing from the map. Tap your spot on the map instead —
+        your booking still goes through fine either way, the rider just uses the map pin plus what you typed.
+      </li>`;
+      return;
+    }
+    list.innerHTML = results.map((r, i) => `<li><button type="button" data-i="${i}">${esc(r.label)}</button></li>`).join('');
+    $$('#searchResults button').forEach((b) => {
+      b.onclick = () => {
+        const r = results[Number(b.dataset.i)];
+        pickMap.setView([r.lat, r.lng], 17);
+        setPin(r.lat, r.lng);
+        list.innerHTML = '';
+      };
+    });
+  } catch (err) {
+    list.innerHTML = `<li style="font-size:13px;color:var(--muted)">${esc(err.message)}</li>`;
+  }
+}
+
+/* ---------- booking ---------- */
+$('#bookForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target);
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  try {
+    const body = {
+      pickup: { label: form.get('pickupLabel') },
+      dropoff: { label: form.get('dropoffLabel'), ...(dropoffMarker ? dropoffMarker.getLatLng() : {}) },
+      instructions: form.get('instructions'),
+      budget: form.get('budget'),
+      paymentMethod: form.get('paymentMethod'),
+    };
+    await api('/api/orders', { body });
+    e.target.reset();
+    if (dropoffMarker) { pickMap.removeLayer(dropoffMarker); dropoffMarker = null; }
+    $('#searchInput').value = '';
+    $('#searchResults').innerHTML = '';
+    $('#locSuggest').innerHTML = '';
+    $('#paymentMethod').value = 'cash';
+    $$('#paymentPicker [data-payment]').forEach((b) => b.className = b.dataset.payment === 'cash' ? 'sm' : 'ghost sm');
+    toast('Booking sent. Admin will put a rider on it.');
+    await loadOrders();
+    $$('.tab')[0].click();
+  } catch (err) {
+    toast(err.message, true);
+  }
+  btn.disabled = false;
+});
+
+/* ---------- orders ---------- */
+async function loadOrders() {
+  const { orders } = await api('/api/orders');
+  const current = orders.find((o) => OPEN.includes(o.status));
+  $('#trackEmpty').classList.toggle('hide', Boolean(current));
+  $('#trackBody').classList.toggle('hide', !current);
+  if (current && (!active || active.id !== current.id)) joinOrder(current.id);
+  else if (current) paintActive(current);
+  else active = null;
+
+  const past = orders.filter((o) => !OPEN.includes(o.status));
+  $('#historyList').innerHTML = past.length
+    ? past.map((o) => `<div class="item">
+        ${routeBoard(o, true)}
+        <div class="top">${statusPill(o.status)}<span class="mono">${esc(o.id)}</span></div>
+        <dl>
+          <dt>Booked</dt><dd>${timeOf(o.createdAt)}</dd>
+          <dt>Rider</dt><dd>${o.rider ? esc(o.rider.fullName) + ' · ' + esc(o.rider.plateNumber || '') : 'None'}</dd>
+          <dt>Asked for</dt><dd>${esc(o.instructions)}</dd>
+        </dl>
+      </div>`).join('')
+    : '<div class="empty">Nothing here yet.</div>';
+}
+
+let chatMessages = [];
+
+function joinOrder(orderId) {
+  socket.emit('order:join', { orderId }, (res) => {
+    if (res.error) return toast(res.error, true);
+    chatMessages = res.messages;
+    paintActive(res.order);
+    renderChat($('#chatLog'), chatMessages, me.id);
+    tracker.clear();
+    if (res.riderLocation) tracker.update(res.riderLocation);
+  });
+}
+
+function paintActive(order) {
+  active = order;
+  $('#activeBoard').innerHTML = routeBoard(order);
+  $('#activeStatus').innerHTML = statusPill(order.status);
+  $('#activeRef').textContent = order.id;
+  $('#activeInstructions').textContent = order.instructions;
+  $('#activePayment').textContent = `Paying by ${order.paymentMethod === 'gcash' ? 'GCash' : 'cash'} · delivery fee starts at ${peso(order.deliveryFee || 40)}, agree on the total in chat.`;
+  $('#activeTimeline').innerHTML = timelineHtml(order);
+  $('#cancelBtn').classList.toggle('hide', !['pending', 'assigned'].includes(order.status));
+
+  $('#riderCard').innerHTML = order.rider
+    ? `<div class="top"><span class="name">${esc(order.rider.fullName)}</span><span class="pill live dot">Your rider</span></div>
+       <dl>
+         <dt>Plate</dt><dd class="mono">${esc(order.rider.plateNumber || '—')}</dd>
+         <dt>Vehicle</dt><dd>${esc(order.rider.vehicle || '—')}</dd>
+         <dt>Mobile</dt><dd>${esc(order.rider.phone || '—')}</dd>
+       </dl>
+       ${order.riderOtherJobs > 0
+         ? `<p style="margin:8px 0 0;font-size:13px;color:var(--muted)">
+             Your rider is also handling ${order.riderOtherJobs} other ${order.riderOtherJobs === 1 ? 'booking' : 'bookings'} right now
+             ${order.riderQueuePosition > 1 ? ` — you're number ${order.riderQueuePosition} in their queue.` : ' — yours is next.'}
+           </p>`
+         : ''}`
+    : order.status === 'pending'
+    ? `<div class="top"><span class="name">Looking for a rider…</span><span class="pill">Pending</span></div>
+       <p style="margin:0;font-size:13px;color:var(--muted)">
+         ${order.offerCount > 0
+           ? `Offered to ${order.offerCount} nearby ${order.offerCount === 1 ? 'rider' : 'riders'}. First to accept gets it.`
+           : 'No riders are online right now. Admin can also assign one from the store.'}
+       </p>`
+    : `<div class="top"><span class="name">No rider yet</span><span class="pill">Pending</span></div>
+       <p style="margin:0;font-size:13px;color:var(--muted)">Admin assigns a rider from the store. You will see their name and plate here.</p>`;
+
+  $('#chatHead').innerHTML = `
+    <div class="who"><span>You</span>${esc(me.fullName)}</div>
+    <div class="who"><span>Rider in charge</span>${order.rider ? esc(order.rider.fullName) : 'Not assigned yet'}</div>
+    <div class="who"><span>Also in this chat</span>Store admin</div>`;
+
+  // Drop the two fixed pins. Clear first so repaints do not stack markers.
+  activePins.clearLayers();
+  ['pickup', 'dropoff'].forEach((key, i) => {
+    const p = order[key];
+    if (p && Number.isFinite(p.lat)) {
+      activePins.addLayer(
+        L.marker([p.lat, p.lng], { icon: pinIcon(i ? 'D' : 'P', i ? '#ffffff' : '#f5850c') }).bindTooltip(p.label)
+      );
+    }
+  });
+  const first = [order.pickup, order.dropoff].find((p) => p && Number.isFinite(p.lat));
+  if (first) activeMap.setView([first.lat, first.lng], 15);
+  activeMap.invalidateSize();
+}
+
+$('#cancelBtn').onclick = async () => {
+  if (!active || !confirm('Cancel this booking?')) return;
+  try {
+    await api(`/api/orders/${active.id}/cancel`, { body: { reason: 'Cancelled by customer' } });
+    toast('Booking cancelled.');
+    await loadOrders();
+  } catch (err) { toast(err.message, true); }
+};
+
+$('#chatForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('#chatInput');
+  const text = input.value.trim();
+  if (!text || !active) return;
+  socket.emit('chat:send', { orderId: active.id, text }, (res) => {
+    if (res && res.error) toast(res.error, true);
+  });
+  input.value = '';
+});
+</script>
+</body>
+</html>
